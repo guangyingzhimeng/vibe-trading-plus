@@ -67,6 +67,19 @@ async function uploadFile(file: File): Promise<UploadResult> {
 
 export const api = {
   uploadFile,
+  createDreamAuthSession: (targetType = "user") =>
+    request<DreamAuthSession>("/auth/dreamauth/session", {
+      method: "POST",
+      body: JSON.stringify({ targetType }),
+    }),
+  getDreamAuthStatus: (sessionNo: string) =>
+    request<DreamAuthStatus>(`/auth/dreamauth/session/${encodeURIComponent(sessionNo)}/status`),
+  completeDreamAuthLogin: (sessionNo: string) =>
+    request<DreamAuthCompleteResult>("/auth/dreamauth/complete", {
+      method: "POST",
+      body: JSON.stringify({ sessionNo }),
+    }),
+  getCurrentAuth: () => request<AuthIdentity>("/auth/me"),
   listRuns: () => request<RunListItem[]>("/runs"),
   getRun: (id: string) => request<RunData>(`/runs/${id}`),
   getRunCode: (id: string) => request<Record<string, string>>(`/runs/${id}/code`),
@@ -104,6 +117,44 @@ export const api = {
       body: JSON.stringify(settings),
     }),
 };
+
+export interface DreamAuthSession {
+  sessionNo: string;
+  scene: string;
+  qrcode: string;
+  expireAt?: string | null;
+  appCode?: string | null;
+}
+
+export interface DreamAuthStatus {
+  sessionNo: string;
+  scene?: string | null;
+  status: number;
+  statusText: string;
+  memberRole?: number | null;
+  authTime?: string | null;
+  expireAt?: string | null;
+  loginReady: boolean;
+  expired: boolean;
+}
+
+export interface DreamAuthCompleteResult {
+  token: string;
+  user: {
+    openid: string;
+    memberRole?: number | null;
+    authTime?: string | null;
+    provider: "dreamauth";
+  };
+}
+
+export interface AuthIdentity {
+  authenticated: boolean;
+  mode: "api_key" | "dreamauth";
+  openid?: string;
+  memberRole?: number | null;
+  expiresAt?: number;
+}
 
 // --- Swarm types ---
 

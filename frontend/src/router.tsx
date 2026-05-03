@@ -1,9 +1,11 @@
 import { Suspense, lazy, type ComponentType } from "react";
-import { createBrowserRouter } from "react-router-dom";
+import { createBrowserRouter, Navigate, useLocation } from "react-router-dom";
 import { Layout } from "@/components/layout/Layout";
+import { getApiAuthKey } from "@/lib/api";
 
 const Home = lazy(() => import("@/pages/Home").then((m) => ({ default: m.Home })));
 const Agent = lazy(() => import("@/pages/Agent").then((m) => ({ default: m.Agent })));
+const Login = lazy(() => import("@/pages/Login").then((m) => ({ default: m.Login })));
 const RunDetail = lazy(() =>
   import("@/pages/RunDetail").then((m) => ({ default: m.RunDetail })),
 );
@@ -33,9 +35,18 @@ function wrap(Component: ComponentType) {
   );
 }
 
+function RequireAuth() {
+  const location = useLocation();
+  if (!getApiAuthKey()) {
+    return <Navigate to="/login" replace state={{ from: location }} />;
+  }
+  return <Layout />;
+}
+
 export const router = createBrowserRouter([
+  { path: "/login", element: wrap(Login) },
   {
-    element: <Layout />,
+    element: <RequireAuth />,
     children: [
       { path: "/", element: wrap(Home) },
       { path: "/agent", element: wrap(Agent) },

@@ -7,6 +7,9 @@ V5: ReAct Agent + async /run + CORS env + SSE tool events.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -18,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Security, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -40,6 +44,13 @@ UPLOADS_DIR = Path(__file__).resolve().parent / "uploads"
 AGENT_DIR = Path(__file__).resolve().parent
 ENV_PATH = AGENT_DIR / ".env"
 ENV_EXAMPLE_PATH = AGENT_DIR / ".env.example"
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(dotenv_path=ENV_PATH, override=False)
+except Exception:
+    pass
 
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
 _UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MB
@@ -201,6 +212,19 @@ class UpdateDataSourceSettingsRequest(BaseModel):
     clear_tushare_token: bool = False
 
 
+class DreamAuthCreateSessionRequest(BaseModel):
+    """Create a DreamAuth QR login session."""
+
+    targetType: str = "user"
+    bizState: Optional[str] = None
+
+
+class DreamAuthSessionRequest(BaseModel):
+    """DreamAuth session identifier payload."""
+
+    sessionNo: str = Field(..., min_length=1)
+
+
 # ---- V4 Session Models ----
 
 class CreateSessionRequest(BaseModel):
@@ -285,6 +309,62 @@ def _configured_api_key() -> str:
     return os.getenv("API_AUTH_KEY") or _API_KEY or ""
 
 
+def _dreamauth_session_secret() -> str:
+    return (
+        os.getenv("DREAMAUTH_SESSION_SECRET")
+        or _configured_api_key()
+        or os.getenv("DREAMAUTH_SECRET_KEY")
+        or ""
+    )
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value + padding)
+
+
+def _issue_dreamauth_session_token(openid: str, member_role: Optional[int] = None) -> str:
+    secret = _dreamauth_session_secret()
+    if not secret:
+        raise HTTPException(status_code=500, detail="DREAMAUTH_SESSION_SECRET or API_AUTH_KEY is required")
+    ttl_seconds = int(os.getenv("DREAMAUTH_SESSION_TTL_SECONDS", "604800"))
+    payload = {
+        "sub": openid,
+        "provider": "dreamauth",
+        "memberRole": member_role,
+        "iat": int(time.time()),
+        "exp": int(time.time()) + ttl_seconds,
+    }
+    payload_part = _b64url_encode(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    signature = hmac.new(secret.encode("utf-8"), payload_part.encode("ascii"), hashlib.sha256).digest()
+    return f"vt1.{payload_part}.{_b64url_encode(signature)}"
+
+
+def _verify_dreamauth_session_token(token: str) -> Optional[Dict[str, Any]]:
+    if not token.startswith("vt1."):
+        return None
+    secret = _dreamauth_session_secret()
+    if not secret:
+        return None
+    try:
+        _, payload_part, signature_part = token.split(".", 2)
+        expected = hmac.new(secret.encode("utf-8"), payload_part.encode("ascii"), hashlib.sha256).digest()
+        if not hmac.compare_digest(_b64url_encode(expected), signature_part):
+            return None
+        payload = json.loads(_b64url_decode(payload_part))
+        if int(payload.get("exp", 0)) < int(time.time()):
+            return None
+        if payload.get("provider") != "dreamauth" or not payload.get("sub"):
+            return None
+        return payload
+    except Exception:
+        return None
+
+
 async def require_auth(
     cred: HTTPAuthorizationCredentials = Security(_security),
 ) -> None:
@@ -302,7 +382,13 @@ async def require_auth(
     api_key = _configured_api_key()
     if not api_key:
         return
-    if not cred or cred.credentials != api_key:
+    if not cred:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    if cred.credentials == api_key:
+        return
+    if _verify_dreamauth_session_token(cred.credentials):
+        return
+    else:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
@@ -1092,6 +1178,183 @@ async def api_info():
         "version": "5.0.0",
         "docs": "/docs",
         "health": "/health",
+    }
+
+
+# ============================================================================
+# DreamAuth QR Login API
+# ============================================================================
+
+DREAMAUTH_OPEN_BASE_URL = "https://guangyingzhimeng.dpdns.org/kite-hub"
+DREAMAUTH_CREATE_PATH = "/api/open/scan-login/session/create"
+DREAMAUTH_STATUS_PATH = "/api/open/scan-login/session/status"
+DREAMAUTH_RESULT_PATH = "/api/open/scan-login/session/result"
+
+
+def _dreamauth_base_url() -> str:
+    return os.getenv("DREAMAUTH_BASE_URL", DREAMAUTH_OPEN_BASE_URL).rstrip("/")
+
+
+def _dreamauth_credentials() -> tuple[str, str, str]:
+    app_code = os.getenv("DREAMAUTH_APP_CODE", "").strip()
+    access_key = os.getenv("DREAMAUTH_ACCESS_KEY", "").strip()
+    secret_key = os.getenv("DREAMAUTH_SECRET_KEY", "").strip()
+    if not app_code or not access_key or not secret_key:
+        raise HTTPException(status_code=500, detail="DreamAuth credentials are not configured")
+    return app_code, access_key, secret_key
+
+
+def _dreamauth_payload_json(payload: Optional[Dict[str, Any]]) -> str:
+    return "" if payload is None else json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _dreamauth_headers(method: str, path: str, payload: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    _, access_key, secret_key = _dreamauth_credentials()
+    timestamp = str(int(time.time()))
+    nonce = uuid.uuid4().hex[:16]
+    sign_source = f"{method.upper()}|{path}|{timestamp}|{nonce}|{_dreamauth_payload_json(payload)}|{secret_key}"
+    sign = hashlib.md5(sign_source.encode("utf-8")).hexdigest()
+    return {
+        "X-Kite-AK": access_key,
+        "X-Kite-Timestamp": timestamp,
+        "X-Kite-Nonce": nonce,
+        "X-Kite-Sign": sign,
+        "Content-Type": "application/json",
+    }
+
+
+async def _dreamauth_request(
+    method: str,
+    path: str,
+    payload: Optional[Dict[str, Any]] = None,
+    params: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.request(
+                method,
+                f"{_dreamauth_base_url()}{path}",
+                params=params,
+                json=payload if method.upper() != "GET" else None,
+                headers=_dreamauth_headers(method, path, payload),
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"DreamAuth request failed: {exc}") from exc
+
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="DreamAuth returned a non-JSON response") from exc
+
+    if response.status_code >= 400 or body.get("code") != 200:
+        detail = body.get("msg") or body.get("message") or f"DreamAuth HTTP {response.status_code}"
+        raise HTTPException(status_code=502, detail=detail)
+    data = body.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _dreamauth_status_payload(data: Dict[str, Any]) -> Dict[str, Any]:
+    status_code = int(data.get("status") or 0)
+    status_text = {
+        1: "请使用微信扫描二维码",
+        2: "已扫码，请在 DreamAuth 中确认授权",
+        3: "授权成功",
+        4: "授权已取消",
+        5: "授权成功",
+        6: "登录结果已消费",
+        7: "二维码已过期",
+    }.get(status_code, "等待扫码")
+    expired = status_code == 7
+    expire_at = data.get("expireAt")
+    if expire_at:
+        try:
+            expire_dt = datetime.fromisoformat(str(expire_at))
+            expired = expired or expire_dt < datetime.now()
+        except (TypeError, ValueError):
+            pass
+    return {
+        "sessionNo": data.get("sessionNo"),
+        "scene": data.get("scene"),
+        "status": status_code,
+        "statusText": "二维码已过期" if expired else status_text,
+        "memberRole": data.get("memberRole"),
+        "authTime": data.get("authTime"),
+        "expireAt": expire_at,
+        "loginReady": status_code in {3, 5},
+        "expired": expired,
+    }
+
+
+@app.post("/auth/dreamauth/session")
+async def create_dreamauth_session(request: DreamAuthCreateSessionRequest):
+    """Create a DreamAuth QR login session through the backend proxy."""
+    app_code, _, _ = _dreamauth_credentials()
+    payload = {
+        "bizCode": "LOGIN",
+        "bizState": request.bizState or f"vibe-trading-{uuid.uuid4().hex[:12]}",
+        "targetType": request.targetType or "user",
+        "expireSeconds": 300,
+    }
+    data = await _dreamauth_request("POST", DREAMAUTH_CREATE_PATH, payload=payload)
+    return {
+        "sessionNo": data.get("sessionNo"),
+        "scene": data.get("scene"),
+        "qrcode": data.get("qrcode"),
+        "expireAt": data.get("expireAt"),
+        "appCode": data.get("appCode") or app_code,
+    }
+
+
+@app.get("/auth/dreamauth/session/{session_no}/status")
+async def get_dreamauth_session_status(session_no: str):
+    """Return a normalized DreamAuth login status for frontend polling."""
+    sign_payload = {"sessionNo": session_no}
+    data = await _dreamauth_request(
+        "GET",
+        DREAMAUTH_STATUS_PATH,
+        payload=sign_payload,
+        params={"sessionNo": session_no},
+    )
+    return _dreamauth_status_payload(data)
+
+
+@app.post("/auth/dreamauth/complete")
+async def complete_dreamauth_login(request: DreamAuthSessionRequest):
+    """Consume the DreamAuth result and issue a Vibe-Trading bearer token."""
+    payload = {"sessionNo": request.sessionNo, "consume": True}
+    data = await _dreamauth_request("POST", DREAMAUTH_RESULT_PATH, payload=payload)
+    openid = str(data.get("openid") or "").strip()
+    if not openid:
+        raise HTTPException(status_code=502, detail="DreamAuth result did not include openid")
+    member_role = data.get("memberRole")
+    token = _issue_dreamauth_session_token(openid, member_role if isinstance(member_role, int) else None)
+    return {
+        "token": token,
+        "user": {
+            "openid": openid,
+            "memberRole": member_role,
+            "authTime": data.get("authTime"),
+            "provider": "dreamauth",
+        },
+    }
+
+
+@app.get("/auth/me")
+async def auth_me(cred: HTTPAuthorizationCredentials = Security(_security)):
+    """Return current DreamAuth token identity, or API-key mode when using API_AUTH_KEY."""
+    if not cred:
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    if cred.credentials == _configured_api_key() and _configured_api_key():
+        return {"authenticated": True, "mode": "api_key"}
+    payload = _verify_dreamauth_session_token(cred.credentials)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid bearer token")
+    return {
+        "authenticated": True,
+        "mode": "dreamauth",
+        "openid": payload.get("sub"),
+        "memberRole": payload.get("memberRole"),
+        "expiresAt": payload.get("exp"),
     }
 
 
