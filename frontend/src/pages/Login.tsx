@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { CheckCircle2, Copy, Loader2, QrCode, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
-import { api, setApiAuthKey, type DreamAuthSession, type DreamAuthStatus } from "@/lib/api";
+import { api, setAuthToken, type DreamAuthSession, type DreamAuthStatus } from "@/lib/api";
 
 const POLL_INTERVAL_MS = 2000;
+const QR_REFRESH_INTERVAL_MS = 60000;
 
 export function Login() {
   const navigate = useNavigate();
@@ -15,6 +16,8 @@ export function Login() {
   const completingRef = useRef(false);
 
   const createSession = async () => {
+    completingRef.current = false;
+    setCompleting(false);
     setLoading(true);
     setStatus(null);
     try {
@@ -33,6 +36,14 @@ export function Login() {
   }, []);
 
   useEffect(() => {
+    if (!session?.sessionNo || completing) return;
+    const timer = window.setTimeout(() => {
+      createSession();
+    }, QR_REFRESH_INTERVAL_MS);
+    return () => window.clearTimeout(timer);
+  }, [completing, session?.sessionNo]);
+
+  useEffect(() => {
     if (!session?.sessionNo) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -46,7 +57,7 @@ export function Login() {
           completingRef.current = true;
           setCompleting(true);
           const result = await api.completeDreamAuthLogin(session.sessionNo);
-          setApiAuthKey(result.token);
+          setAuthToken(result.token);
           toast.success("登录成功");
           navigate("/agent", { replace: true });
           return;
@@ -91,8 +102,6 @@ export function Login() {
   };
 
   const refresh = () => {
-    completingRef.current = false;
-    setCompleting(false);
     createSession();
   };
 

@@ -1,10 +1,10 @@
 ﻿import { useEffect, useState } from "react";
-import { Link, Outlet, useLocation, useSearchParams } from "react-router-dom";
-import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Languages, Settings } from "lucide-react";
+import { Link, Outlet, useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Languages, Settings, LogOut, UserCircle2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
 import { useDarkMode } from "@/hooks/useDarkMode";
-import { api, type SessionItem } from "@/lib/api";
+import { api, clearAuthToken, type SessionItem } from "@/lib/api";
 import { useAgentStore } from "@/stores/agent";
 import { ConnectionBanner } from "@/components/layout/ConnectionBanner";
 
@@ -17,11 +17,13 @@ const NAV = [
 
 export function Layout() {
   const { pathname } = useLocation();
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { t, language, setLanguage } = useI18n();
   const { dark, toggle } = useDarkMode();
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [authOpenid, setAuthOpenid] = useState("");
   const sseStatus = useAgentStore(s => s.sseStatus);
   const sseRetryAttempt = useAgentStore(s => s.sseRetryAttempt);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("qa-sidebar") === "collapsed");
@@ -31,6 +33,12 @@ export function Layout() {
   useEffect(() => {
     localStorage.setItem("qa-sidebar", collapsed ? "collapsed" : "expanded");
   }, [collapsed]);
+
+  useEffect(() => {
+    api.getCurrentAuth()
+      .then((identity) => setAuthOpenid(identity.openid || "DreamAuth"))
+      .catch(() => setAuthOpenid("DreamAuth"));
+  }, []);
 
   const loadSessions = () => {
     api.listSessions()
@@ -63,6 +71,11 @@ export function Layout() {
       setSessions((prev) => prev.map((s) => s.session_id === sid ? { ...s, title: renameValue.trim() } : s));
     } catch { /* ignore */ }
     setRenameTarget(null);
+  };
+
+  const logout = () => {
+    clearAuthToken();
+    navigate("/login", { replace: true });
   };
 
   return (
@@ -200,6 +213,9 @@ export function Layout() {
         <div className={cn("border-t", collapsed ? "p-1 flex flex-col items-center gap-1" : "p-3 space-y-2")}>
           {collapsed ? (
             <>
+              <button onClick={logout} className="p-1.5 text-muted-foreground hover:text-danger rounded transition-colors" title="退出登录">
+                <UserCircle2 className="h-3.5 w-3.5" />
+              </button>
               <button onClick={toggle} className="p-1.5 text-muted-foreground hover:text-foreground rounded transition-colors" title={dark ? t.lightMode : t.darkMode}>
                 {dark ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
               </button>
@@ -216,6 +232,22 @@ export function Layout() {
             </>
           ) : (
             <>
+              <button
+                onClick={logout}
+                className="flex w-full items-center justify-between gap-2 rounded-md border bg-background/70 px-2.5 py-2 text-left transition hover:bg-muted"
+                title="退出登录"
+              >
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+                    <UserCircle2 className="h-4 w-4" />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block truncate text-xs font-medium text-foreground">{authOpenid || "DreamAuth"}</span>
+                    <span className="block text-[10px] text-muted-foreground">点击退出登录</span>
+                  </span>
+                </span>
+                <LogOut className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              </button>
               <div className="flex items-center justify-between">
                 <button
                   onClick={toggle}

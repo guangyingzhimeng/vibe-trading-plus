@@ -10,7 +10,6 @@ import asyncio
 import base64
 import hashlib
 import hmac
-import ipaddress
 import json
 import os
 import signal
@@ -301,21 +300,8 @@ async def _run_startup_preflight() -> None:
 # ============================================================================
 
 _security = HTTPBearer(auto_error=False)
-_API_KEY = os.getenv("API_AUTH_KEY")
-
-
-def _configured_api_key() -> str:
-    """Return the current API auth key, if configured."""
-    return os.getenv("API_AUTH_KEY") or _API_KEY or ""
-
-
 def _dreamauth_session_secret() -> str:
-    return (
-        os.getenv("DREAMAUTH_SESSION_SECRET")
-        or _configured_api_key()
-        or os.getenv("DREAMAUTH_SECRET_KEY")
-        or ""
-    )
+    return os.getenv("DREAMAUTH_SESSION_SECRET") or os.getenv("DREAMAUTH_SECRET_KEY") or ""
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -330,7 +316,7 @@ def _b64url_decode(value: str) -> bytes:
 def _issue_dreamauth_session_token(openid: str, member_role: Optional[int] = None) -> str:
     secret = _dreamauth_session_secret()
     if not secret:
-        raise HTTPException(status_code=500, detail="DREAMAUTH_SESSION_SECRET or API_AUTH_KEY is required")
+        raise HTTPException(status_code=500, detail="DREAMAUTH_SESSION_SECRET is required")
     ttl_seconds = int(os.getenv("DREAMAUTH_SESSION_TTL_SECONDS", "604800"))
     payload = {
         "sub": openid,
@@ -368,59 +354,21 @@ def _verify_dreamauth_session_token(token: str) -> Optional[Dict[str, Any]]:
 async def require_auth(
     cred: HTTPAuthorizationCredentials = Security(_security),
 ) -> None:
-    """Validate Bearer token against API_AUTH_KEY environment variable.
-
-    If API_AUTH_KEY is not set, authentication is skipped (dev mode).
-    Only write endpoints (POST/PUT/DELETE/PATCH) use this dependency.
-
-    Args:
-        cred: HTTP Bearer credentials extracted from the Authorization header.
-
-    Raises:
-        HTTPException: 401 when API_AUTH_KEY is set but the token is missing or wrong.
-    """
-    api_key = _configured_api_key()
-    if not api_key:
-        return
+    """Require a DreamAuth-issued Vibe-Trading bearer token."""
     if not cred:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
-    if cred.credentials == api_key:
-        return
+        raise HTTPException(status_code=401, detail="Missing DreamAuth session token")
     if _verify_dreamauth_session_token(cred.credentials):
         return
-    else:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
-
-
-def _is_local_client(request: Request) -> bool:
-    """Return whether the request originates from a loopback client."""
-    host = request.client.host if request.client else ""
-    if host in {"localhost", "testclient"}:
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+    raise HTTPException(status_code=401, detail="Invalid DreamAuth session token")
 
 
 async def require_local_or_auth(
     request: Request,
     cred: HTTPAuthorizationCredentials = Security(_security),
 ) -> None:
-    """Protect settings access when dev-mode auth is disabled.
-
-    If API_AUTH_KEY is configured, require the bearer token. If not, allow only
-    loopback clients so an API server bound to 0.0.0.0 cannot accept remote
-    credential reads or writes in dev mode.
-    """
-    if _configured_api_key():
-        await require_auth(cred)
-        return
-    if not _is_local_client(request):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Settings access requires API_AUTH_KEY or a local loopback client",
-        )
+    """Protect settings access with the same DreamAuth session as write APIs."""
+    del request
+    await require_auth(cred)
 
 
 # ============================================================================
@@ -1341,11 +1289,9 @@ async def complete_dreamauth_login(request: DreamAuthSessionRequest):
 
 @app.get("/auth/me")
 async def auth_me(cred: HTTPAuthorizationCredentials = Security(_security)):
-    """Return current DreamAuth token identity, or API-key mode when using API_AUTH_KEY."""
+    """Return current DreamAuth token identity."""
     if not cred:
         raise HTTPException(status_code=401, detail="Missing bearer token")
-    if cred.credentials == _configured_api_key() and _configured_api_key():
-        return {"authenticated": True, "mode": "api_key"}
     payload = _verify_dreamauth_session_token(cred.credentials)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid bearer token")

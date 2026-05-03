@@ -21,7 +21,7 @@ services:
       - agent/.env
     environment:
       - VITE_API_URL=http://vibe-trading:8899
-    command: sh -c "export VITE_API_AUTH_KEY=$${API_AUTH_KEY}; npm install && npm run dev -- --host 0.0.0.0 --port 5899"
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5899"
     profiles:
       - frontend
     depends_on:

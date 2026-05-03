@@ -1,14 +1,12 @@
 const BASE = import.meta.env.VITE_BROWSER_API_URL || "";
-const AUTH_STORAGE_KEY = "vibe-trading-api-auth-key";
+const AUTH_STORAGE_KEY = "vibe-trading-dreamauth-token";
 
-export function getApiAuthKey(): string {
-  const envToken = import.meta.env.VITE_API_AUTH_KEY?.trim();
-  if (envToken) return envToken;
+export function getAuthToken(): string {
   if (typeof window === "undefined") return "";
   return window.localStorage.getItem(AUTH_STORAGE_KEY)?.trim() || "";
 }
 
-export function setApiAuthKey(token: string): void {
+export function setAuthToken(token: string): void {
   if (typeof window === "undefined") return;
   const trimmed = token.trim();
   if (trimmed) {
@@ -18,8 +16,13 @@ export function setApiAuthKey(token: string): void {
   }
 }
 
+export function clearAuthToken(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(AUTH_STORAGE_KEY);
+}
+
 function authHeaders(): HeadersInit {
-  const token = getApiAuthKey();
+  const token = getAuthToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
@@ -150,7 +153,7 @@ export interface DreamAuthCompleteResult {
 
 export interface AuthIdentity {
   authenticated: boolean;
-  mode: "api_key" | "dreamauth";
+  mode: "dreamauth";
   openid?: string;
   memberRole?: number | null;
   expiresAt?: number;
