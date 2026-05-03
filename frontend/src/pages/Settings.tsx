@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Database, KeyRound, Loader2, RotateCcw, Save, Server, SlidersHorizontal } from "lucide-react";
 import { toast } from "sonner";
-import { api, type DataSourceSettings, type LLMProviderOption, type LLMSettings } from "@/lib/api";
+import { api, getApiAuthKey, setApiAuthKey, type DataSourceSettings, type LLMProviderOption, type LLMSettings } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
 interface LLMFormState {
@@ -43,9 +43,13 @@ export function Settings() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [dataSaving, setDataSaving] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authKeyInput, setAuthKeyInput] = useState(() => getApiAuthKey());
 
-  useEffect(() => {
+  const loadSettings = useCallback(() => {
     let alive = true;
+    setLoading(true);
+    setAuthError(null);
     Promise.all([api.getLLMSettings(), api.getDataSourceSettings()])
       .then(([llmData, dataSourceData]) => {
         if (!alive) return;
@@ -54,14 +58,19 @@ export function Settings() {
         setDataSettings(dataSourceData);
       })
       .catch((error) => {
-        toast.error(`${t.llmSettingsLoadFailed}: ${error.message}`);
-        toast.error(`${t.dataSourceSettingsLoadFailed}: ${error.message}`);
+        if (!alive) return;
+        const message = error instanceof Error ? error.message : t.unknownError;
+        setAuthError(message);
+        toast.error(`${t.llmSettingsLoadFailed}: ${message}`);
+        toast.error(`${t.dataSourceSettingsLoadFailed}: ${message}`);
       })
       .finally(() => {
         if (alive) setLoading(false);
       });
     return () => { alive = false; };
-  }, [t.dataSourceSettingsLoadFailed, t.llmSettingsLoadFailed]);
+  }, [t.dataSourceSettingsLoadFailed, t.llmSettingsLoadFailed, t.unknownError]);
+
+  useEffect(() => loadSettings(), [loadSettings]);
 
   const providers = settings?.providers ?? [];
   const selectedProvider = useMemo<LLMProviderOption | undefined>(
@@ -131,6 +140,43 @@ export function Settings() {
       setDataSaving(false);
     }
   };
+
+  const submitAuthKey = (event: FormEvent) => {
+    event.preventDefault();
+    setApiAuthKey(authKeyInput);
+    loadSettings();
+  };
+
+  if (!loading && authError && (!form || !settings || !dataSettings)) {
+    return (
+      <div className="mx-auto flex min-h-[60vh] max-w-md items-center">
+        <form onSubmit={submitAuthKey} className="w-full rounded-lg border bg-card p-5 shadow-sm">
+          <div className="mb-4 flex items-start gap-3">
+            <div className="rounded-md bg-primary/10 p-2 text-primary">
+              <KeyRound className="h-5 w-5" />
+            </div>
+            <div>
+              <h1 className="text-base font-semibold">{t.apiAuthKey}</h1>
+              <p className="mt-1 text-sm text-muted-foreground">{t.apiAuthKeyDesc}</p>
+            </div>
+          </div>
+          <input
+            className={fieldClass}
+            type="password"
+            autoComplete="current-password"
+            placeholder={t.apiAuthKeyPlaceholder}
+            value={authKeyInput}
+            onChange={(event) => setAuthKeyInput(event.target.value)}
+          />
+          <p className="mt-2 text-xs text-destructive">{authError}</p>
+          <button type="submit" className="mt-4 inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/90">
+            <Save className="h-4 w-4" />
+            {t.saveApiAuthKey}
+          </button>
+        </form>
+      </div>
+    );
+  }
 
   if (loading || !form || !settings || !dataSettings) {
     return (

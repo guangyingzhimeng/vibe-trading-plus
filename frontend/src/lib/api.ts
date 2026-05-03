@@ -1,9 +1,32 @@
-const BASE = "";
+const BASE = import.meta.env.VITE_BROWSER_API_URL || "";
+const AUTH_STORAGE_KEY = "vibe-trading-api-auth-key";
+
+export function getApiAuthKey(): string {
+  const envToken = import.meta.env.VITE_API_AUTH_KEY?.trim();
+  if (envToken) return envToken;
+  if (typeof window === "undefined") return "";
+  return window.localStorage.getItem(AUTH_STORAGE_KEY)?.trim() || "";
+}
+
+export function setApiAuthKey(token: string): void {
+  if (typeof window === "undefined") return;
+  const trimmed = token.trim();
+  if (trimmed) {
+    window.localStorage.setItem(AUTH_STORAGE_KEY, trimmed);
+  } else {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+  }
+}
+
+function authHeaders(): HeadersInit {
+  const token = getApiAuthKey();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json", ...options?.headers },
     ...options,
+    headers: { "Content-Type": "application/json", ...authHeaders(), ...options?.headers },
   });
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
@@ -26,7 +49,11 @@ export interface UploadResult {
 async function uploadFile(file: File): Promise<UploadResult> {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(`${BASE}/upload`, { method: "POST", body: form });
+  const res = await fetch(`${BASE}/upload`, {
+    method: "POST",
+    body: form,
+    headers: authHeaders(),
+  });
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
     try {
