@@ -1,6 +1,6 @@
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
-const messages = {
+const enMessages = {
   home: "Home", agent: "Agent", runs: "Runs", settings: "Settings",
   settingsDesc: "Configure model credentials and market data source tokens for this local project.",
   llmSettings: "LLM Settings",
@@ -70,13 +70,13 @@ const messages = {
   sessions: "Sessions", newChat: "New Chat", deleteConfirm: "Delete?",
   noSessions: "No sessions yet",
   viewDetails: "View Details",
-  fullReport: "Full Report →",
+  fullReport: "Full Report ->",
   strategyComparison: "Strategy Comparison",
   baseline: "Baseline", compareTo: "Compare", delta: "Delta", metric: "Metric",
   selectRun: "-- Select --",
   selectTwoRuns: "Select two runs to compare their metrics.",
   online: "Online", offline: "Offline",
-  checking: "Checking…", checkConnection: "Check Connection",
+  checking: "Checking...", checkConnection: "Check Connection",
   appearance: "Appearance",
   connection: "Connection",
   endpoints: "Endpoints",
@@ -88,11 +88,11 @@ const messages = {
   noPriceData: "No price data", noEquityData: "No equity data",
   filterLogs: "Filter logs...",
   confirmDelete: "Confirm", cancelDelete: "Cancel",
-  reconnectingN: "Connection lost, reconnecting (attempt {n})…",
+  reconnectingN: "Connection lost, reconnecting (attempt {n})...",
   disconnected: "Connection lost",
   sessionCreated: "Session started",
   sendFailed: "Failed to send message, please retry.",
-  reconnecting: "Connection lost, reconnecting…",
+  reconnecting: "Connection lost, reconnecting...",
   connected: "Connection restored",
   toolLoadSkill: "Load strategy knowledge",
   toolWriteFile: "Generate code",
@@ -109,7 +109,7 @@ const messages = {
   toolProcessing: "Processing",
   toolRunning: "Running",
   thinkingRunning: "Running {tool}...",
-  thinkingDone: "Done · {count} steps",
+  thinkingDone: "Done - {count} steps",
   metricTotalReturn: "Total Return",
   metricAnnualReturn: "Annual",
   metricSharpe: "Sharpe",
@@ -160,15 +160,218 @@ const messages = {
   computeBtn: "Compute",
   methodLabel: "Method",
   noCorrelationData: "No correlation data available",
-} as const;
+};
 
-type Messages = typeof messages;
+type Messages = typeof enMessages;
+export type Language = "zh" | "en";
 
-const I18nCtx = createContext<{ t: Messages }>({ t: messages });
+const zhMessages: Messages = {
+  home: "首页", agent: "智能体", runs: "运行记录", settings: "设置",
+  settingsDesc: "配置当前本地项目的模型凭据和行情数据源令牌。",
+  llmSettings: "大模型设置",
+  llmSettingsDesc: "选择智能体使用的模型，并保存到项目本地的 agent/.env 文件。",
+  llmConnection: "连接",
+  llmGeneration: "生成参数",
+  llmProvider: "服务商",
+  llmModelName: "模型",
+  llmBaseUrl: "Base URL",
+  llmApiKey: "API 密钥",
+  llmApiKeyConfigured: "已配置为 {key}",
+  llmApiKeyPlaceholder: "留空则保留当前密钥",
+  llmClearApiKey: "清除已保存的 API 密钥",
+  llmNoApiKeyRequired: "该服务商不需要 API 密钥。",
+  llmOauthRequired: "该服务商使用 OAuth。请运行：{command}",
+  llmTemperature: "温度",
+  llmTimeoutSeconds: "超时秒数",
+  llmMaxRetries: "最大重试次数",
+  llmReasoningEffort: "推理强度",
+  llmReasoningOff: "关闭",
+  llmSaveSettings: "保存设置",
+  llmSaving: "保存中...",
+  llmSettingsSaved: "大模型设置已保存",
+  llmSettingsLoadFailed: "加载大模型设置失败",
+  llmSettingsSaveFailed: "保存大模型设置失败",
+  llmEnvPath: "保存到",
+  llmProviderHint: "切换服务商会自动填入推荐模型和端点。",
+  llmModelHint: "请填写服务商要求的精确模型 ID。",
+  llmUseProviderDefaults: "使用服务商默认值",
+  dataSourceSettings: "数据源设置",
+  dataSourceSettingsDesc: "配置回测和研究智能体使用的可选行情数据凭据。",
+  tushareToken: "Tushare 令牌",
+  tushareTokenConfigured: "已配置为 {key}",
+  tushareTokenPlaceholder: "留空则保留当前令牌",
+  tushareTokenHint: "用于 A 股、期货、基金和宏观数据。未设置时，项目会在可用场景下回退到 AKShare。",
+  clearTushareToken: "清除已保存的 Tushare 令牌",
+  baostockStatus: "BaoStock",
+  baostockSupported: "加载器可用",
+  baostockNotSupported: "项目未提供加载器",
+  baostockPackageInstalled: "Python 包已安装",
+  baostockPackageMissing: "Python 包未安装",
+  saveDataSourceSettings: "保存数据源设置",
+  dataSourceSettingsSaved: "数据源设置已保存",
+  dataSourceSettingsLoadFailed: "加载数据源设置失败",
+  dataSourceSettingsSaveFailed: "保存数据源设置失败",
+  apiAuthKey: "API 认证密钥",
+  apiAuthKeyDesc: "请输入服务端配置的 API_AUTH_KEY，以访问受保护的设置页面。",
+  apiAuthKeyPlaceholder: "Bearer token",
+  saveApiAuthKey: "保存密钥",
+  unknownError: "未知错误",
+  startResearch: "开始研究", describeStrategy: "描述一个交易策略即可开始。",
+  prompt: "例如：创建 000001.SZ 的双均线交叉策略，回测 2024 年",
+  send: "发送", loading: "加载中...", noRuns: "还没有运行记录。请到智能体页面创建一个。",
+  runHistory: "运行历史", status: "状态", elapsed: "耗时",
+  chart: "图表", trades: "交易", code: "代码", trace: "轨迹",
+  noData: "暂无数据", noTrades: "没有交易记录。", noCode: "没有代码文件。",
+  noTrace: "没有轨迹数据。", priceAndTrades: "价格与交易", equityAndDrawdown: "权益与回撤",
+  examples: "试试示例：", bye: "再见",
+  heroTitle: "AI 驱动的量化策略研究",
+  heroDesc: "用自然语言描述交易策略。智能体会生成代码、运行回测并持续优化，全程实时可见。",
+  feat1: "AI 智能体", feat1d: "基于 ReAct 推理的自然语言策略生成",
+  feat2: "内置回测", feat2d: "支持 3 类数据源：A 股、美/港股、加密货币",
+  feat3: "实时流式输出", feat3d: "观看智能体思考、调用工具和迭代策略",
+  feat4: "策略复盘", feat4d: "交易日志分析 + Shadow Account：提取你的规则、回测并归因 PnL 差异",
+  score: "评分", passed: "通过", failed: "失败", findings: "发现", recommendations: "建议",
+  darkMode: "深色", lightMode: "浅色", language: "语言",
+  sessions: "会话", newChat: "新会话", deleteConfirm: "删除？",
+  noSessions: "暂无会话",
+  viewDetails: "查看详情",
+  fullReport: "完整报告 ->",
+  strategyComparison: "策略对比",
+  baseline: "基准", compareTo: "对比对象", delta: "差值", metric: "指标",
+  selectRun: "-- 请选择 --",
+  selectTwoRuns: "选择两个运行记录来对比指标。",
+  online: "在线", offline: "离线",
+  checking: "检查中...", checkConnection: "检查连接",
+  appearance: "外观",
+  connection: "连接",
+  endpoints: "端点",
+  review: "复核",
+  noReview: "暂无复核数据。",
+  colTime: "时间", colCode: "代码", colSide: "方向",
+  colPrice: "价格", colQty: "数量", colReason: "原因",
+  equityDrawdown: "权益与回撤",
+  noPriceData: "暂无价格数据", noEquityData: "暂无权益数据",
+  filterLogs: "筛选日志...",
+  confirmDelete: "确认", cancelDelete: "取消",
+  reconnectingN: "连接中断，正在重连（第 {n} 次）...",
+  disconnected: "连接中断",
+  sessionCreated: "会话已创建",
+  sendFailed: "发送消息失败，请重试。",
+  reconnecting: "连接中断，正在重连...",
+  connected: "连接已恢复",
+  toolLoadSkill: "加载策略知识",
+  toolWriteFile: "生成代码",
+  toolEditFile: "编辑代码",
+  toolReadFile: "读取文件",
+  toolRunBacktest: "运行回测",
+  toolBash: "运行命令",
+  toolReadUrl: "读取网页",
+  toolReadDocument: "读取文档",
+  toolCompact: "压缩上下文",
+  toolCreateTask: "创建任务",
+  toolUpdateTask: "更新任务",
+  toolSpawnSubagent: "创建子智能体",
+  toolProcessing: "处理中",
+  toolRunning: "运行中",
+  thinkingRunning: "正在运行 {tool}...",
+  thinkingDone: "完成 - {count} 步",
+  metricTotalReturn: "总收益",
+  metricAnnualReturn: "年化收益",
+  metricSharpe: "夏普比率",
+  metricMaxDrawdown: "最大回撤",
+  metricWinRate: "胜率",
+  metricTradeCount: "交易次数",
+  metricFinalValue: "期末资产",
+  metricCalmar: "卡玛比率",
+  metricSortino: "索提诺比率",
+  metricProfitLossRatio: "盈亏比",
+  metricMaxConsecutiveLoss: "最大连亏",
+  metricAvgHoldingDays: "平均持仓天数",
+  metricBenchmarkReturn: "基准收益",
+  metricExcessReturn: "超额收益",
+  metricIR: "信息比率",
+  validation: "验证",
+  overlayMA: "均线",
+  overlayChannel: "通道",
+  overlayIndicators: "指标",
+  overlayClearAll: "裸 K（清空）",
+  rename: "重命名",
+  goBack: "返回",
+  noChartData: "暂无图表数据",
+  noChartDataHint: "回测引擎可能没有生成价格数据。请检查 artifacts/ 目录。",
+  executionFailed: "执行失败",
+  executionTimeout: "执行超时，已自动停止",
+  cancelSent: "已发送取消请求",
+  cancelFailed: "取消失败",
+  exportChat: "导出对话",
+  stopGeneration: "停止生成",
+  newMessages: "新消息",
+  stepN: "第 {n} 步",
+  exportTitle: "# 对话导出",
+  exportTime: "导出时间",
+  exportUser: "## 用户",
+  exportAssistant: "## 助手",
+  exportError: "## 错误",
+  exportToolCall: "> 工具调用",
+  exportRunComplete: "> 回测完成",
+  downloadTradesCsv: "下载交易 CSV",
+  downloadMetricsCsv: "下载指标 CSV",
+  example1: "000001.SZ 双均线交叉（5/20 日），回测 2024 年",
+  example2: "为 000001.SZ 构建双均线交叉策略，回测 2024 年",
+  example3: "600519.SH 布林带均值回归，回测近 3 年",
+  correlation: "相关性矩阵",
+  selectAssets: "资产代码",
+  windowLabel: "窗口（天）",
+  computeBtn: "计算",
+  methodLabel: "方法",
+  noCorrelationData: "暂无相关性数据",
+};
+
+const LANGUAGE_STORAGE_KEY = "vibe-trading-language";
+const translations: Record<Language, Messages> = {
+  zh: zhMessages,
+  en: enMessages,
+};
+
+interface I18nContextValue {
+  t: Messages;
+  language: Language;
+  setLanguage: (language: Language) => void;
+}
+
+function initialLanguage(): Language {
+  if (typeof window === "undefined") return "zh";
+  return window.localStorage.getItem(LANGUAGE_STORAGE_KEY) === "en" ? "en" : "zh";
+}
+
+const I18nCtx = createContext<I18nContextValue>({
+  t: zhMessages,
+  language: "zh",
+  setLanguage: () => {},
+});
 
 export function I18nProvider({ children }: { children: ReactNode }) {
+  const [language, setLanguageState] = useState<Language>(initialLanguage);
+
+  const setLanguage = (nextLanguage: Language) => {
+    setLanguageState(nextLanguage);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(LANGUAGE_STORAGE_KEY, nextLanguage);
+    }
+  };
+
+  useEffect(() => {
+    document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
+  }, [language]);
+
+  const value = useMemo<I18nContextValue>(() => ({
+    t: translations[language],
+    language,
+    setLanguage,
+  }), [language]);
+
   return (
-    <I18nCtx.Provider value={{ t: messages }}>
+    <I18nCtx.Provider value={value}>
       {children}
     </I18nCtx.Provider>
   );

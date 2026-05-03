@@ -1,6 +1,6 @@
 ﻿import { useEffect, useState } from "react";
 import { Link, Outlet, useLocation, useSearchParams } from "react-router-dom";
-import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings } from "lucide-react";
+import { BarChart3, Bot, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Languages, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
 import { useDarkMode } from "@/hooks/useDarkMode";
@@ -18,7 +18,7 @@ const NAV = [
 export function Layout() {
   const { pathname } = useLocation();
   const [searchParams] = useSearchParams();
-  const { t } = useI18n();
+  const { t, language, setLanguage } = useI18n();
   const { dark, toggle } = useDarkMode();
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
@@ -203,6 +203,13 @@ export function Layout() {
               <button onClick={toggle} className="p-1.5 text-muted-foreground hover:text-foreground rounded transition-colors" title={dark ? t.lightMode : t.darkMode}>
                 {dark ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
               </button>
+              <button
+                onClick={() => setLanguage(language === "zh" ? "en" : "zh")}
+                className="p-1.5 text-muted-foreground hover:text-foreground rounded transition-colors"
+                title={t.language}
+              >
+                <Languages className="h-3.5 w-3.5" />
+              </button>
               <button onClick={() => setCollapsed(false)} className="p-1.5 text-muted-foreground hover:text-foreground rounded transition-colors" title="Expand">
                 <ChevronsRight className="h-3.5 w-3.5" />
               </button>
@@ -218,6 +225,14 @@ export function Layout() {
                   {dark ? t.lightMode : t.darkMode}
                 </button>
                 <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setLanguage(language === "zh" ? "en" : "zh")}
+                    className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    title={t.language}
+                  >
+                    <Languages className="h-3.5 w-3.5" />
+                    {language === "zh" ? "EN" : "中"}
+                  </button>
                   <button
                     onClick={() => setCollapsed(true)}
                     className="p-1 text-muted-foreground hover:text-foreground rounded transition-colors"
@@ -243,4 +258,3 @@ export function Layout() {
     </div>
   );
 }
-
