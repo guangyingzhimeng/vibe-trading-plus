@@ -28,7 +28,9 @@ from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from rich.console import Console
 
+from src.auth.users import user_key_from_payload
 from src.ui_services import build_run_analysis, load_run_context
+from src.user_settings.service import UserSettingsError, UserSettingsService
 
 # UTF-8 on Windows
 import sys as _sys
@@ -316,9 +318,9 @@ async def _run_startup_preflight() -> None:
 # ============================================================================
 
 _security = HTTPBearer(auto_error=False)
-_mongo_client = None
 _session_services: Dict[str, Any] = {}
 _swarm_runtimes: Dict[str, Any] = {}
+_user_settings_service: Optional[UserSettingsService] = None
 
 
 def _dreamauth_session_secret() -> str:
@@ -398,10 +400,7 @@ async def require_local_or_auth(
 
 
 def _user_key_from_payload(payload: Optional[Dict[str, Any]]) -> Optional[str]:
-    openid = str((payload or {}).get("sub") or "").strip()
-    if not openid:
-        return None
-    return hashlib.sha256(openid.encode("utf-8")).hexdigest()[:24]
+    return user_key_from_payload(payload)
 
 
 def _require_user_key(payload: Dict[str, Any]) -> str:
@@ -427,69 +426,29 @@ def _user_memory_dir(user_key: str) -> Path:
     return AGENT_DIR / "user_data" / user_key / "memory"
 
 
-def _mongo_uri() -> str:
-    return os.getenv(
-        "MONGO_URI",
-        "mongodb://trading:vibe-trading@mongo:27017/vibe_trading?authSource=admin",
-    )
-
-
-def _mongo_user_settings_collection():
-    """Return the Mongo collection for per-user settings."""
-    global _mongo_client
-    try:
-        from pymongo import MongoClient
-        from pymongo.errors import PyMongoError
-    except ImportError as exc:
-        raise HTTPException(status_code=503, detail="pymongo is not installed") from exc
-
-    try:
-        if _mongo_client is None:
-            _mongo_client = MongoClient(_mongo_uri(), serverSelectionTimeoutMS=1200)
-            _mongo_client.admin.command("ping")
-        db_name = os.getenv("MONGO_DB", "vibe_trading")
-        collection = _mongo_client[db_name]["user_settings"]
-        collection.create_index("openid", unique=True)
-        return collection
-    except PyMongoError as exc:
-        raise HTTPException(status_code=503, detail=f"MongoDB unavailable: {exc}") from exc
+def _get_user_settings_service() -> UserSettingsService:
+    """Return the settings service used by HTTP handlers and runtime startup."""
+    global _user_settings_service
+    if _user_settings_service is None:
+        _user_settings_service = UserSettingsService(
+            default_values_loader=_read_settings_env_values,
+            local_values_writer=lambda updates: _write_env_values(ENV_PATH, updates),
+        )
+    return _user_settings_service
 
 
 def _read_user_settings_values(user: Optional[Dict[str, Any]]) -> Dict[str, str]:
-    """Read settings for the current user, falling back to dotenv defaults for dev."""
-    values = _read_settings_env_values()
-    user_key = _user_key_from_payload(user)
-    if not user_key:
-        return values
-
-    doc = _mongo_user_settings_collection().find_one({"_id": user_key}) or {}
-    settings = doc.get("settings") if isinstance(doc.get("settings"), dict) else {}
-    for key, value in settings.items():
-        if isinstance(key, str) and isinstance(value, str):
-            values[key] = value
-    return values
+    try:
+        return _get_user_settings_service().read_values(user)
+    except UserSettingsError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def _write_user_settings_values(user: Optional[Dict[str, Any]], updates: Dict[str, str]) -> None:
-    """Persist settings updates either per-user in Mongo or to .env for local dev."""
-    user_key = _user_key_from_payload(user)
-    if not user_key:
-        _write_env_values(ENV_PATH, updates)
-        return
-    openid = str(user.get("sub") or "")
-    set_values = {f"settings.{key}": value for key, value in updates.items()}
-    _mongo_user_settings_collection().update_one(
-        {"_id": user_key},
-        {
-            "$set": {
-                **set_values,
-                "openid": openid,
-                "updated_at": datetime.now().isoformat(),
-            },
-            "$setOnInsert": {"created_at": datetime.now().isoformat()},
-        },
-        upsert=True,
-    )
+    try:
+        _get_user_settings_service().write_values(user, updates)
+    except UserSettingsError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def _apply_user_runtime_env(user: Optional[Dict[str, Any]]) -> Dict[str, str]:

@@ -7,6 +7,8 @@ services:
         VITE_BROWSER_API_PREFIX: ${VITE_BROWSER_API_PREFIX:-/vibe-trading}
     ports:
       - "8899:8899"
+    networks:
+      - way
     env_file:
       - agent/.env
     volumes:
@@ -23,15 +25,61 @@ services:
     restart: unless-stopped
 
   mongo:
-    image: mongo:7
+    image: docker.1ms.run/mongo:latest
+    container_name: mongo
+    networks:
+      - way
+    restart: always
     ports:
-      - "27017:27017"
+      - 27017:27017
+    command: mongod --keyFile /data/mongodb.key --replSet rs0
     environment:
       - MONGO_INITDB_ROOT_USERNAME=trading
       - MONGO_INITDB_ROOT_PASSWORD=vibe-trading
     volumes:
       - vibe-mongo:/data/db
-    restart: unless-stopped
+    entrypoint:
+      - bash
+      - -c
+      - |
+        openssl rand -base64 128 > /data/mongodb.key
+        chmod 400 /data/mongodb.key
+        chown 999:999 /data/mongodb.key
+
+        cat > /data/initReplicaSet.js <<'EOF'
+        let isInited = false;
+
+        try {
+          isInited = rs.status().ok === 1;
+        } catch (e) {
+          isInited = false;
+        }
+
+        if (!isInited) {
+          rs.initiate({
+            _id: "rs0",
+            members: [
+              { _id: 0, host: "mongo:27017" }
+            ]
+          });
+        }
+        EOF
+
+        exec docker-entrypoint.sh "$$@" &
+
+        CLIENT="mongosh"
+        command -v mongosh >/dev/null 2>&1 || CLIENT="mongo"
+
+        echo "Waiting for MongoDB to start and authenticating..."
+        until $$CLIENT -u "$$MONGO_INITDB_ROOT_USERNAME" -p "$$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval "db.runCommand({ ping: 1 })"; do
+          sleep 2
+        done
+
+        echo "Authentication successful, initializing replica set..."
+        $$CLIENT -u "$$MONGO_INITDB_ROOT_USERNAME" -p "$$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin /data/initReplicaSet.js
+
+        echo "Replica set initialized!"
+        wait $$!
 
   frontend:
     image: node:20
@@ -58,3 +106,7 @@ volumes:
   vibe-uploads:
   vibe-swarm:
   vibe-mongo:
+
+networks:
+  way:
+    external: true
