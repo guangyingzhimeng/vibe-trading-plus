@@ -286,6 +286,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_API_PATH_PREFIX = os.getenv("API_PATH_PREFIX", "/vibe-trading").strip().rstrip("/")
+
+
+@app.middleware("http")
+async def strip_api_path_prefix(request: Request, call_next):
+    """Allow deployments to route API calls through a stable path prefix."""
+    if _API_PATH_PREFIX and _API_PATH_PREFIX != "/" and request.scope["path"].startswith(f"{_API_PATH_PREFIX}/"):
+        request.scope["path"] = request.scope["path"][len(_API_PATH_PREFIX):] or "/"
+    return await call_next(request)
+
 
 @app.on_event("startup")
 async def _run_startup_preflight() -> None:

@@ -97,7 +97,7 @@ export const RunCompleteCard = memo(function RunCompleteCard({ msg }: Props) {
           )}
           {msg.shadowId && (
             <a
-              href={`/shadow-reports/${encodeURIComponent(msg.shadowId)}?format=html`}
+              href={api.shadowReportUrl(msg.shadowId)}
               target="_blank"
               rel="noopener noreferrer"
               className="text-sm text-teal-600 dark:text-teal-400 hover:underline inline-flex items-center gap-1.5 font-medium"

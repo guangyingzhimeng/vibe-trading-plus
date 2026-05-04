@@ -1,5 +1,17 @@
 const BASE = import.meta.env.VITE_BROWSER_API_URL || "";
+const API_PREFIX = import.meta.env.VITE_BROWSER_API_PREFIX ?? "/vibe-trading";
 const AUTH_STORAGE_KEY = "vibe-trading-dreamauth-token";
+
+function normalizePrefix(prefix: string): string {
+  const trimmed = prefix.trim();
+  if (!trimmed || trimmed === "/") return "";
+  return trimmed.startsWith("/") ? trimmed.replace(/\/+$/, "") : `/${trimmed.replace(/\/+$/, "")}`;
+}
+
+export function apiUrl(path: string): string {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${BASE}${normalizePrefix(API_PREFIX)}${normalizedPath}`;
+}
 
 export function getAuthToken(): string {
   if (typeof window === "undefined") return "";
@@ -27,7 +39,7 @@ function authHeaders(): HeadersInit {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(apiUrl(path), {
     ...options,
     headers: { "Content-Type": "application/json", ...authHeaders(), ...options?.headers },
   });
@@ -52,7 +64,7 @@ export interface UploadResult {
 async function uploadFile(file: File): Promise<UploadResult> {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(`${BASE}/upload`, {
+  const res = await fetch(apiUrl("/upload"), {
     method: "POST",
     body: form,
     headers: authHeaders(),
@@ -94,7 +106,7 @@ export const api = {
   sendMessage: (sid: string, content: string) => request<{ message_id: string; attempt_id: string }>(`/sessions/${sid}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
   cancelSession: (sid: string) => request<{ status: string }>(`/sessions/${sid}/cancel`, { method: "POST" }),
   getSessionMessages: (sid: string) => request<MessageItem[]>(`/sessions/${sid}/messages`),
-  sseUrl: (sid: string) => `${BASE}/sessions/${sid}/events`,
+  sseUrl: (sid: string) => apiUrl(`/sessions/${sid}/events`),
 
   // Swarm API
   listSwarmPresets: () => request<SwarmPreset[]>("/swarm/presets"),
@@ -105,8 +117,15 @@ export const api = {
     }),
   listSwarmRuns: () => request<SwarmRunSummary[]>("/swarm/runs"),
   getSwarmRun: (id: string) => request<Record<string, unknown>>(`/swarm/runs/${id}`),
+  swarmSseUrl: (id: string) => apiUrl(`/swarm/runs/${id}/events`),
   cancelSwarmRun: (id: string) =>
     request<{ status: string }>(`/swarm/runs/${id}/cancel`, { method: "POST" }),
+  getCorrelation: (codes: string, days: number, method: "pearson" | "spearman") =>
+    request<{ labels: string[]; matrix: number[][] }>(
+      `/correlation?codes=${encodeURIComponent(codes)}&days=${days}&method=${method}`,
+    ),
+  shadowReportUrl: (shadowId: string) =>
+    apiUrl(`/shadow-reports/${encodeURIComponent(shadowId)}?format=html`),
   getLLMSettings: () => request<LLMSettings>("/settings/llm"),
   updateLLMSettings: (settings: UpdateLLMSettingsRequest) =>
     request<LLMSettings>("/settings/llm", {
