@@ -8,6 +8,7 @@ import { useI18n } from "@/lib/i18n";
 import { api } from "@/lib/api";
 import type { AgentMessage, ToolCallEntry } from "@/types/agent";
 import { AgentAvatar } from "@/components/chat/AgentAvatar";
+import { MarkdownRenderer } from "@/components/chat/MarkdownRenderer";
 import { WelcomeScreen } from "@/components/chat/WelcomeScreen";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { ThinkingTimeline } from "@/components/chat/ThinkingTimeline";
@@ -691,8 +692,8 @@ export function Agent() {
               <AgentAvatar />
               <div className="flex-1 min-w-0 space-y-1.5">
                 {streamingText && (
-                  <div className="prose prose-sm dark:prose-invert max-w-none leading-relaxed">
-                    {streamingText}
+                  <div className="relative">
+                    <MarkdownRenderer content={streamingText} isStreaming />
                     <span className="inline-block w-0.5 h-4 bg-primary ml-0.5 animate-pulse align-middle" />
                   </div>
                 )}
