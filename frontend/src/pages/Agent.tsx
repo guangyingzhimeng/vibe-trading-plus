@@ -345,7 +345,7 @@ export function Agent() {
     try {
       const result = await api.createSwarmRun(presetName, { goal: prompt });
       const runId = result.id;
-      const evtSource = new EventSource(api.swarmSseUrl(runId));
+      const evtSource = new EventSource(api.swarmSseUrl(runId), { withCredentials: true });
       let sseFinished = false;
 
       evtSource.addEventListener("layer_started", (e) => {

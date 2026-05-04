@@ -41,6 +41,7 @@ function authHeaders(): HeadersInit {
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(apiUrl(path), {
     ...options,
+    credentials: "include",
     headers: { "Content-Type": "application/json", ...authHeaders(), ...options?.headers },
   });
   if (!res.ok) {
@@ -67,6 +68,7 @@ async function uploadFile(file: File): Promise<UploadResult> {
   const res = await fetch(apiUrl("/upload"), {
     method: "POST",
     body: form,
+    credentials: "include",
     headers: authHeaders(),
   });
   if (!res.ok) {

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Security, UploadFile, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response, Security, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -372,6 +372,41 @@ def _verify_dreamauth_session_token(token: str) -> Optional[Dict[str, Any]]:
         return payload
     except Exception:
         return None
+
+
+def _dreamauth_cookie_secure() -> bool:
+    return os.getenv("DREAMAUTH_COOKIE_SECURE", "true").strip().lower() not in {"0", "false", "no"}
+
+
+def _set_dreamauth_cookie(response: Response, token: str) -> None:
+    ttl_seconds = int(os.getenv("DREAMAUTH_SESSION_TTL_SECONDS", "604800"))
+    response.set_cookie(
+        key="dreamauth_session",
+        value=token,
+        max_age=ttl_seconds,
+        httponly=True,
+        secure=_dreamauth_cookie_secure(),
+        samesite="none",
+        path="/",
+    )
+
+
+def _auth_payload_from_request(request: Request, token: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    candidates: list[str] = []
+    if token:
+        candidates.append(token)
+    authorization = request.headers.get("Authorization", "")
+    if authorization.lower().startswith("bearer "):
+        candidates.append(authorization[7:].strip())
+    cookie_token = request.cookies.get("dreamauth_session", "")
+    if cookie_token:
+        candidates.append(cookie_token)
+
+    for candidate in candidates:
+        payload = _verify_dreamauth_session_token(candidate)
+        if payload:
+            return payload
+    return None
 
 
 async def require_auth(
@@ -1406,7 +1441,7 @@ async def get_dreamauth_session_status(session_no: str):
 
 
 @app.post("/auth/dreamauth/complete")
-async def complete_dreamauth_login(request: DreamAuthSessionRequest):
+async def complete_dreamauth_login(request: DreamAuthSessionRequest, response: Response):
     """Consume the DreamAuth result and issue a Vibe-Trading bearer token."""
     payload = {"sessionNo": request.sessionNo, "consume": True}
     data = await _dreamauth_request("POST", DREAMAUTH_RESULT_PATH, payload=payload)
@@ -1415,6 +1450,7 @@ async def complete_dreamauth_login(request: DreamAuthSessionRequest):
         raise HTTPException(status_code=502, detail="DreamAuth result did not include openid")
     member_role = data.get("memberRole")
     token = _issue_dreamauth_session_token(openid, member_role if isinstance(member_role, int) else None)
+    _set_dreamauth_cookie(response, token)
     return {
         "token": token,
         "user": {
@@ -1629,7 +1665,7 @@ async def session_events(
     token: Optional[str] = Query(None),
 ):
     """SSE stream for agent events."""
-    payload = _verify_dreamauth_session_token(token or "")
+    payload = _auth_payload_from_request(request, token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid DreamAuth session token")
     svc = _get_session_service(payload)
@@ -1854,7 +1890,7 @@ async def swarm_run_events(
 ):
     """SSE stream for a swarm run."""
     import asyncio
-    payload = _verify_dreamauth_session_token(token or "")
+    payload = _auth_payload_from_request(request, token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid DreamAuth session token")
     runtime = _get_swarm_runtime(_require_user_key(payload))

@@ -70,7 +70,7 @@ export function useSSE(config?: SSEConfig) {
     if (closedRef.current) return;
 
     const url = buildUrl(urlRef.current);
-    const source = new EventSource(url);
+    const source = new EventSource(url, { withCredentials: true });
     sourceRef.current = source;
 
     source.onopen = () => {
