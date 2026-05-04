@@ -316,6 +316,11 @@ async def _run_startup_preflight() -> None:
 # ============================================================================
 
 _security = HTTPBearer(auto_error=False)
+_mongo_client = None
+_session_services: Dict[str, Any] = {}
+_swarm_runtimes: Dict[str, Any] = {}
+
+
 def _dreamauth_session_secret() -> str:
     return os.getenv("DREAMAUTH_SESSION_SECRET") or os.getenv("DREAMAUTH_SECRET_KEY") or ""
 
@@ -369,22 +374,151 @@ def _verify_dreamauth_session_token(token: str) -> Optional[Dict[str, Any]]:
 
 async def require_auth(
     cred: HTTPAuthorizationCredentials = Security(_security),
-) -> None:
+) -> Dict[str, Any]:
     """Require a DreamAuth-issued Vibe-Trading bearer token."""
     if not cred:
         raise HTTPException(status_code=401, detail="Missing DreamAuth session token")
-    if _verify_dreamauth_session_token(cred.credentials):
-        return
+    payload = _verify_dreamauth_session_token(cred.credentials)
+    if payload:
+        return payload
     raise HTTPException(status_code=401, detail="Invalid DreamAuth session token")
 
 
 async def require_local_or_auth(
     request: Request,
     cred: HTTPAuthorizationCredentials = Security(_security),
-) -> None:
-    """Protect settings access with the same DreamAuth session as write APIs."""
-    del request
-    await require_auth(cred)
+) -> Optional[Dict[str, Any]]:
+    """Allow loopback settings access for tests/dev, otherwise require DreamAuth."""
+    if not cred:
+        client_host = request.client.host if request.client else ""
+        if client_host in {"127.0.0.1", "::1", "localhost"}:
+            return None
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Local access or DreamAuth token required")
+    return await require_auth(cred)
+
+
+def _user_key_from_payload(payload: Optional[Dict[str, Any]]) -> Optional[str]:
+    openid = str((payload or {}).get("sub") or "").strip()
+    if not openid:
+        return None
+    return hashlib.sha256(openid.encode("utf-8")).hexdigest()[:24]
+
+
+def _require_user_key(payload: Dict[str, Any]) -> str:
+    user_key = _user_key_from_payload(payload)
+    if not user_key:
+        raise HTTPException(status_code=401, detail="Invalid DreamAuth user")
+    return user_key
+
+
+def _user_runs_dir(user_key: str) -> Path:
+    return RUNS_DIR / "users" / user_key
+
+
+def _user_sessions_dir(user_key: str) -> Path:
+    return SESSIONS_DIR / "users" / user_key
+
+
+def _user_uploads_dir(user_key: str) -> Path:
+    return UPLOADS_DIR / "users" / user_key
+
+
+def _user_memory_dir(user_key: str) -> Path:
+    return AGENT_DIR / "user_data" / user_key / "memory"
+
+
+def _mongo_uri() -> str:
+    return os.getenv(
+        "MONGO_URI",
+        "mongodb://trading:vibe-trading@mongo:27017/vibe_trading?authSource=admin",
+    )
+
+
+def _mongo_user_settings_collection():
+    """Return the Mongo collection for per-user settings."""
+    global _mongo_client
+    try:
+        from pymongo import MongoClient
+        from pymongo.errors import PyMongoError
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail="pymongo is not installed") from exc
+
+    try:
+        if _mongo_client is None:
+            _mongo_client = MongoClient(_mongo_uri(), serverSelectionTimeoutMS=1200)
+            _mongo_client.admin.command("ping")
+        db_name = os.getenv("MONGO_DB", "vibe_trading")
+        collection = _mongo_client[db_name]["user_settings"]
+        collection.create_index("openid", unique=True)
+        return collection
+    except PyMongoError as exc:
+        raise HTTPException(status_code=503, detail=f"MongoDB unavailable: {exc}") from exc
+
+
+def _read_user_settings_values(user: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Read settings for the current user, falling back to dotenv defaults for dev."""
+    values = _read_settings_env_values()
+    user_key = _user_key_from_payload(user)
+    if not user_key:
+        return values
+
+    doc = _mongo_user_settings_collection().find_one({"_id": user_key}) or {}
+    settings = doc.get("settings") if isinstance(doc.get("settings"), dict) else {}
+    for key, value in settings.items():
+        if isinstance(key, str) and isinstance(value, str):
+            values[key] = value
+    return values
+
+
+def _write_user_settings_values(user: Optional[Dict[str, Any]], updates: Dict[str, str]) -> None:
+    """Persist settings updates either per-user in Mongo or to .env for local dev."""
+    user_key = _user_key_from_payload(user)
+    if not user_key:
+        _write_env_values(ENV_PATH, updates)
+        return
+    openid = str(user.get("sub") or "")
+    set_values = {f"settings.{key}": value for key, value in updates.items()}
+    _mongo_user_settings_collection().update_one(
+        {"_id": user_key},
+        {
+            "$set": {
+                **set_values,
+                "openid": openid,
+                "updated_at": datetime.now().isoformat(),
+            },
+            "$setOnInsert": {"created_at": datetime.now().isoformat()},
+        },
+        upsert=True,
+    )
+
+
+def _apply_user_runtime_env(user: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Apply one user's settings to process env before constructing runtime clients."""
+    values = _read_user_settings_values(user)
+    provider_name = values.get("LANGCHAIN_PROVIDER", "openai").strip().lower()
+    provider = LLM_PROVIDER_BY_NAME.get(provider_name, LLM_PROVIDER_BY_NAME["openai"])
+
+    keys = {
+        "LANGCHAIN_PROVIDER",
+        "LANGCHAIN_MODEL_NAME",
+        "LANGCHAIN_TEMPERATURE",
+        "TIMEOUT_SECONDS",
+        "MAX_RETRIES",
+        "LANGCHAIN_REASONING_EFFORT",
+        "TUSHARE_TOKEN",
+        provider.base_url_env,
+    }
+    if provider.api_key_env:
+        keys.add(provider.api_key_env)
+
+    updates = {key: values.get(key, "") for key in keys}
+    _sync_runtime_env(provider, updates)
+    token = updates.get("TUSHARE_TOKEN", "").strip()
+    if _is_configured_secret(token, TUSHARE_TOKEN_PLACEHOLDERS):
+        os.environ["TUSHARE_TOKEN"] = token
+    else:
+        os.environ.pop("TUSHARE_TOKEN", None)
+    return values
 
 
 # ============================================================================
@@ -796,7 +930,7 @@ def _build_response_from_run_dir(run_dir: Path, elapsed: float, *, include_analy
 # ============================================================================
 
 @app.get("/runs/{run_id}/code")
-async def get_run_code(run_id: str):
+async def get_run_code(run_id: str, user: Dict[str, Any] = Depends(require_auth)):
     """Return strategy source files for a run.
 
     Args:
@@ -805,7 +939,7 @@ async def get_run_code(run_id: str):
     Returns:
         Map filename -> source text.
     """
-    run_dir = RUNS_DIR / run_id / "code"
+    run_dir = _user_runs_dir(_require_user_key(user)) / run_id / "code"
     if not run_dir.exists():
         raise HTTPException(status_code=404, detail=f"Code directory for run {run_id} not found")
     result = {}
@@ -817,7 +951,7 @@ async def get_run_code(run_id: str):
 
 
 @app.get("/runs/{run_id}/pine")
-async def get_run_pine(run_id: str):
+async def get_run_pine(run_id: str, user: Dict[str, Any] = Depends(require_auth)):
     """Return Pine Script file for a run.
 
     Args:
@@ -826,7 +960,7 @@ async def get_run_pine(run_id: str):
     Returns:
         Object with pine script content and exists flag.
     """
-    pine_path = RUNS_DIR / run_id / "artifacts" / "strategy.pine"
+    pine_path = _user_runs_dir(_require_user_key(user)) / run_id / "artifacts" / "strategy.pine"
     if not pine_path.exists():
         return {"exists": False, "content": None}
     return {
@@ -836,9 +970,9 @@ async def get_run_pine(run_id: str):
 
 
 @app.get("/runs/{run_id}", response_model=RunResponse)
-async def get_run_result(run_id: str):
+async def get_run_result(run_id: str, user: Dict[str, Any] = Depends(require_auth)):
     """Fetch full details for a historical run by ``run_id``."""
-    run_dir = RUNS_DIR / run_id
+    run_dir = _user_runs_dir(_require_user_key(user)) / run_id
 
     if not run_dir.exists():
         raise HTTPException(
@@ -852,10 +986,10 @@ async def get_run_result(run_id: str):
 
 
 @app.get("/runs", response_model=List[RunInfo])
-async def list_runs(limit: int = 20):
+async def list_runs(limit: int = 20, user: Dict[str, Any] = Depends(require_auth)):
     """List recent runs with summary fields."""
     limit = min(max(1, limit), 100)
-    runs_dir = RUNS_DIR
+    runs_dir = _user_runs_dir(_require_user_key(user))
     
     if not runs_dir.exists():
         return []
@@ -955,15 +1089,17 @@ async def list_runs(limit: int = 20):
 @app.get(
     "/settings/llm",
     response_model=LLMSettingsResponse,
-    dependencies=[Depends(require_local_or_auth)],
 )
-async def get_llm_settings():
+async def get_llm_settings(user: Optional[Dict[str, Any]] = Depends(require_local_or_auth)):
     """Return project-local LLM settings for the Web UI."""
-    return _build_llm_settings_response()
+    return _build_llm_settings_response(_read_user_settings_values(user))
 
 
-@app.put("/settings/llm", response_model=LLMSettingsResponse, dependencies=[Depends(require_local_or_auth)])
-async def update_llm_settings(payload: UpdateLLMSettingsRequest):
+@app.put("/settings/llm", response_model=LLMSettingsResponse)
+async def update_llm_settings(
+    payload: UpdateLLMSettingsRequest,
+    user: Optional[Dict[str, Any]] = Depends(require_local_or_auth),
+):
     """Persist project-local LLM settings and update the running process."""
     provider_name = payload.provider.strip().lower()
     provider = LLM_PROVIDER_BY_NAME.get(provider_name)
@@ -981,7 +1117,7 @@ async def update_llm_settings(payload: UpdateLLMSettingsRequest):
     if reasoning_effort not in LLM_REASONING_EFFORTS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Reasoning effort must be low, medium, high, or max")
 
-    current_values = _read_settings_env_values()
+    current_values = _read_user_settings_values(user)
     base_url = (payload.base_url if payload.base_url is not None else provider.default_base_url).strip()
     if provider.auth_type == "oauth":
         try:
@@ -1015,29 +1151,30 @@ async def update_llm_settings(payload: UpdateLLMSettingsRequest):
     elif payload.clear_api_key:
         os.environ.pop("OPENAI_API_KEY", None)
 
-    _write_env_values(ENV_PATH, updates)
+    _write_user_settings_values(user, updates)
     _sync_runtime_env(provider, updates)
-    return _build_llm_settings_response(_read_env_values(ENV_PATH))
+    return _build_llm_settings_response(_read_user_settings_values(user))
 
 
 @app.get(
     "/settings/data-sources",
     response_model=DataSourceSettingsResponse,
-    dependencies=[Depends(require_local_or_auth)],
 )
-async def get_data_source_settings():
+async def get_data_source_settings(user: Optional[Dict[str, Any]] = Depends(require_local_or_auth)):
     """Return project-local data source credentials for the Web UI."""
-    return _build_data_source_settings_response()
+    return _build_data_source_settings_response(_read_user_settings_values(user))
 
 
 @app.put(
     "/settings/data-sources",
     response_model=DataSourceSettingsResponse,
-    dependencies=[Depends(require_local_or_auth)],
 )
-async def update_data_source_settings(payload: UpdateDataSourceSettingsRequest):
+async def update_data_source_settings(
+    payload: UpdateDataSourceSettingsRequest,
+    user: Optional[Dict[str, Any]] = Depends(require_local_or_auth),
+):
     """Persist project-local data source credentials and update the running process."""
-    current_values = _read_settings_env_values()
+    current_values = _read_user_settings_values(user)
     updates: Dict[str, str] = {}
 
     if payload.clear_tushare_token:
@@ -1048,14 +1185,14 @@ async def update_data_source_settings(payload: UpdateDataSourceSettingsRequest):
         updates["TUSHARE_TOKEN"] = current_values["TUSHARE_TOKEN"]
 
     if updates:
-        _write_env_values(ENV_PATH, updates)
+        _write_user_settings_values(user, updates)
         token = updates.get("TUSHARE_TOKEN", "").strip()
         if _is_configured_secret(token, TUSHARE_TOKEN_PLACEHOLDERS):
             os.environ["TUSHARE_TOKEN"] = token
         else:
             os.environ.pop("TUSHARE_TOKEN", None)
 
-    return _build_data_source_settings_response(_read_env_values(ENV_PATH))
+    return _build_data_source_settings_response(_read_user_settings_values(user))
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -1324,14 +1461,11 @@ async def auth_me(cred: HTTPAuthorizationCredentials = Security(_security)):
 # Session API
 # ============================================================================
 
-_session_service = None
-
-
-def _get_session_service():
+def _get_session_service(user: Dict[str, Any]):
     """Lazy-init session service when ENABLE_SESSION_RUNTIME=true."""
-    global _session_service
-    if _session_service is not None:
-        return _session_service
+    user_key = _require_user_key(user)
+    if user_key in _session_services:
+        return _session_services[user_key]
 
     if os.getenv("ENABLE_SESSION_RUNTIME", "true").lower() != "true":
         return None
@@ -1341,7 +1475,7 @@ def _get_session_service():
     from src.session.events import EventBus
     from src.session.service import SessionService
 
-    store = SessionStore(base_dir=SESSIONS_DIR)
+    store = SessionStore(base_dir=_user_sessions_dir(user_key))
     event_bus = EventBus()
 
     try:
@@ -1353,15 +1487,18 @@ def _get_session_service():
     _session_service = SessionService(
         store=store,
         event_bus=event_bus,
-        runs_dir=RUNS_DIR,
+        runs_dir=_user_runs_dir(user_key),
+        memory_dir=_user_memory_dir(user_key),
+        env_loader=lambda: _apply_user_runtime_env(user),
     )
+    _session_services[user_key] = _session_service
     return _session_service
 
 
-@app.post("/sessions", response_model=SessionResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_auth)])
-async def create_session(request: CreateSessionRequest):
+@app.post("/sessions", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
+async def create_session(request: CreateSessionRequest, user: Dict[str, Any] = Depends(require_auth)):
     """Create a chat session."""
-    svc = _get_session_service()
+    svc = _get_session_service(user)
     if not svc:
         raise HTTPException(status_code=501, detail="Session runtime not enabled")
     session = svc.create_session(title=request.title, config=request.config)
@@ -1376,9 +1513,9 @@ async def create_session(request: CreateSessionRequest):
 
 
 @app.get("/sessions", response_model=List[SessionResponse])
-async def list_sessions(limit: int = Query(50, ge=1, le=200)):
+async def list_sessions(limit: int = Query(50, ge=1, le=200), user: Dict[str, Any] = Depends(require_auth)):
     """List sessions."""
-    svc = _get_session_service()
+    svc = _get_session_service(user)
     if not svc:
         raise HTTPException(status_code=501, detail="Session runtime not enabled")
     sessions = svc.list_sessions(limit=limit)
@@ -1396,9 +1533,9 @@ async def list_sessions(limit: int = Query(50, ge=1, le=200)):
 
 
 @app.get("/sessions/{session_id}", response_model=SessionResponse)
-async def get_session(session_id: str):
+async def get_session(session_id: str, user: Dict[str, Any] = Depends(require_auth)):
     """Get one session by id."""
-    svc = _get_session_service()
+    svc = _get_session_service(user)
     if not svc:
         raise HTTPException(status_code=501, detail="Session runtime not enabled")
     session = svc.get_session(session_id)
@@ -1414,10 +1551,10 @@ async def get_session(session_id: str):
     )
 
 
-@app.delete("/sessions/{session_id}", dependencies=[Depends(require_auth)])
-async def delete_session(session_id: str):
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, user: Dict[str, Any] = Depends(require_auth)):
     """Delete a session."""
-    svc = _get_session_service()
+    svc = _get_session_service(user)
     if not svc:
         raise HTTPException(status_code=501, detail="Session runtime not enabled")
     deleted = svc.delete_session(session_id)
@@ -1431,10 +1568,10 @@ class UpdateSessionRequest(BaseModel):
     title: Optional[str] = None
 
 
-@app.patch("/sessions/{session_id}", dependencies=[Depends(require_auth)])
-async def update_session(session_id: str, req: UpdateSessionRequest):
+@app.patch("/sessions/{session_id}")
+async def update_session(session_id: str, req: UpdateSessionRequest, user: Dict[str, Any] = Depends(require_auth)):
     """Update session fields (e.g. title)."""
-    svc = _get_session_service()
+    svc = _get_session_service(user)
     if not svc:
         raise HTTPException(status_code=501, detail="Session runtime not enabled")
     session = svc.store.get_session(session_id)
@@ -1448,10 +1585,10 @@ async def update_session(session_id: str, req: UpdateSessionRequest):
     return {"status": "updated", "session_id": session_id}
 
 
-@app.post("/sessions/{session_id}/messages", dependencies=[Depends(require_auth)])
-async def send_message(session_id: str, request: SendMessageRequest):
+@app.post("/sessions/{session_id}/messages")
+async def send_message(session_id: str, request: SendMessageRequest, user: Dict[str, Any] = Depends(require_auth)):
     """Send a user message and start the agent loop (natural language strategy)."""
-    svc = _get_session_service()
+    svc = _get_session_service(user)
     if not svc:
         raise HTTPException(status_code=501, detail="Session runtime not enabled")
     try:
@@ -1461,10 +1598,10 @@ async def send_message(session_id: str, request: SendMessageRequest):
         raise HTTPException(status_code=404, detail=str(exc))
 
 
-@app.post("/sessions/{session_id}/cancel", dependencies=[Depends(require_auth)])
-async def cancel_session(session_id: str):
+@app.post("/sessions/{session_id}/cancel")
+async def cancel_session(session_id: str, user: Dict[str, Any] = Depends(require_auth)):
     """Cancel the in-flight agent loop for this session."""
-    svc = _get_session_service()
+    svc = _get_session_service(user)
     if not svc:
         raise HTTPException(status_code=501, detail="Session runtime not enabled")
     cancelled = svc.cancel_current(session_id)
@@ -1474,9 +1611,13 @@ async def cancel_session(session_id: str):
 
 
 @app.get("/sessions/{session_id}/messages", response_model=List[MessageResponse])
-async def get_messages(session_id: str, limit: int = Query(100, ge=1, le=1000)):
+async def get_messages(
+    session_id: str,
+    limit: int = Query(100, ge=1, le=1000),
+    user: Dict[str, Any] = Depends(require_auth),
+):
     """List messages for a session."""
-    svc = _get_session_service()
+    svc = _get_session_service(user)
     if not svc:
         raise HTTPException(status_code=501, detail="Session runtime not enabled")
     messages = svc.get_messages(session_id, limit=limit)
@@ -1499,9 +1640,13 @@ async def session_events(
     session_id: str,
     request: Request,
     last_event_id: Optional[str] = Query(None, alias="Last-Event-ID"),
+    token: Optional[str] = Query(None),
 ):
     """SSE stream for agent events."""
-    svc = _get_session_service()
+    payload = _verify_dreamauth_session_token(token or "")
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid DreamAuth session token")
+    svc = _get_session_service(payload)
     if not svc:
         raise HTTPException(status_code=501, detail="Session runtime not enabled")
     session = svc.get_session(session_id)
@@ -1569,8 +1714,8 @@ async def get_shadow_report(shadow_id: str, format: str = "html"):
     )
 
 
-@app.post("/upload", dependencies=[Depends(require_auth)])
-async def upload_file(file: UploadFile):
+@app.post("/upload")
+async def upload_file(file: UploadFile, user: Dict[str, Any] = Depends(require_auth)):
     """Upload any document or data file (max 50MB).
 
     Accepts most common formats: PDF, Word, Excel, PowerPoint, images,
@@ -1586,10 +1731,11 @@ async def upload_file(file: UploadFile):
             detail=f"File type {ext} is not allowed (executables/archives blocked).",
         )
 
-    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    upload_dir = _user_uploads_dir(_require_user_key(user))
+    upload_dir.mkdir(parents=True, exist_ok=True)
 
     safe_name = f"{uuid.uuid4().hex}{ext}"
-    dest = UPLOADS_DIR / safe_name
+    dest = upload_dir / safe_name
     total_size = 0
 
     try:
@@ -1628,19 +1774,16 @@ async def upload_file(file: UploadFile):
 # Swarm API
 # ============================================================================
 
-_swarm_runtime = None
-
-
-def _get_swarm_runtime():
+def _get_swarm_runtime(user_key: str):
     """Lazy-init SwarmRuntime singleton."""
-    global _swarm_runtime
-    if _swarm_runtime is not None:
-        return _swarm_runtime
+    if user_key in _swarm_runtimes:
+        return _swarm_runtimes[user_key]
     from src.swarm.store import SwarmStore
     from src.swarm.runtime import SwarmRuntime
-    swarm_dir = Path(__file__).resolve().parent / ".swarm" / "runs"
+    swarm_dir = Path(__file__).resolve().parent / ".swarm" / "users" / user_key / "runs"
     store = SwarmStore(base_dir=swarm_dir)
     _swarm_runtime = SwarmRuntime(store=store)
+    _swarm_runtimes[user_key] = _swarm_runtime
     return _swarm_runtime
 
 
@@ -1651,10 +1794,10 @@ async def list_swarm_presets():
     return list_presets()
 
 
-@app.post("/swarm/runs", dependencies=[Depends(require_auth)])
-async def create_swarm_run(request: dict):
+@app.post("/swarm/runs")
+async def create_swarm_run(request: dict, user: Dict[str, Any] = Depends(require_auth)):
     """Start a swarm run: body must include preset_name and user_vars."""
-    runtime = _get_swarm_runtime()
+    runtime = _get_swarm_runtime(_require_user_key(user))
     preset_name = request.get("preset_name", "")
     user_vars = request.get("user_vars", {})
     try:
@@ -1667,9 +1810,9 @@ async def create_swarm_run(request: dict):
 
 
 @app.get("/swarm/runs")
-async def list_swarm_runs(limit: int = Query(20, ge=1, le=100)):
+async def list_swarm_runs(limit: int = Query(20, ge=1, le=100), user: Dict[str, Any] = Depends(require_auth)):
     """List swarm runs (newest first)."""
-    runtime = _get_swarm_runtime()
+    runtime = _get_swarm_runtime(_require_user_key(user))
     runs = runtime._store.list_runs(limit=limit)
     return [
         {
@@ -1685,11 +1828,11 @@ async def list_swarm_runs(limit: int = Query(20, ge=1, le=100)):
 
 
 @app.get("/swarm/runs/{run_id}")
-async def get_swarm_run(run_id: str):
+async def get_swarm_run(run_id: str, user: Dict[str, Any] = Depends(require_auth)):
     """Swarm run detail including task statuses."""
     from src.swarm.task_store import TaskStore
 
-    runtime = _get_swarm_runtime()
+    runtime = _get_swarm_runtime(_require_user_key(user))
     run = runtime._store.load_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
@@ -1717,10 +1860,18 @@ async def get_swarm_run(run_id: str):
 
 
 @app.get("/swarm/runs/{run_id}/events")
-async def swarm_run_events(run_id: str, request: Request, last_index: int = Query(0, ge=0)):
+async def swarm_run_events(
+    run_id: str,
+    request: Request,
+    last_index: int = Query(0, ge=0),
+    token: Optional[str] = Query(None),
+):
     """SSE stream for a swarm run."""
     import asyncio
-    runtime = _get_swarm_runtime()
+    payload = _verify_dreamauth_session_token(token or "")
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid DreamAuth session token")
+    runtime = _get_swarm_runtime(_require_user_key(payload))
 
     async def event_stream():
         idx = last_index
@@ -1740,10 +1891,10 @@ async def swarm_run_events(run_id: str, request: Request, last_index: int = Quer
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@app.post("/swarm/runs/{run_id}/cancel", dependencies=[Depends(require_auth)])
-async def cancel_swarm_run(run_id: str):
+@app.post("/swarm/runs/{run_id}/cancel")
+async def cancel_swarm_run(run_id: str, user: Dict[str, Any] = Depends(require_auth)):
     """Cancel an active swarm run."""
-    runtime = _get_swarm_runtime()
+    runtime = _get_swarm_runtime(_require_user_key(user))
     ok = runtime.cancel_run(run_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"No active run {run_id}")

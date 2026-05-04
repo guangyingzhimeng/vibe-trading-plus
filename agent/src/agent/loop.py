@@ -280,6 +280,7 @@ class AgentLoop:
         event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
         max_iterations: int = 50,
         persistent_memory: Optional[Any] = None,
+        runs_dir: Optional[Path] = None,
     ) -> None:
         """Initialize AgentLoop.
 
@@ -300,6 +301,7 @@ class AgentLoop:
         self._cancelled: bool = False
         self._previous_summary: str = ""
         self._persistent_memory = persistent_memory
+        self.runs_dir = runs_dir or RUNS_DIR
 
     def cancel(self) -> None:
         """Cancel the current loop.
@@ -325,12 +327,12 @@ class AgentLoop:
         self._previous_summary = ""
 
         state_store = RunStateStore()
-        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        self.runs_dir.mkdir(parents=True, exist_ok=True)
 
         if self.memory.run_dir and Path(self.memory.run_dir).exists():
             run_dir = Path(self.memory.run_dir)
         else:
-            run_dir = state_store.create_run_dir(RUNS_DIR)
+            run_dir = state_store.create_run_dir(self.runs_dir)
             self.memory.run_dir = str(run_dir)
 
         state_store.save_request(run_dir, user_message, {"session_id": session_id})

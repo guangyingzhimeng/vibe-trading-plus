@@ -106,7 +106,8 @@ export const api = {
   sendMessage: (sid: string, content: string) => request<{ message_id: string; attempt_id: string }>(`/sessions/${sid}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
   cancelSession: (sid: string) => request<{ status: string }>(`/sessions/${sid}/cancel`, { method: "POST" }),
   getSessionMessages: (sid: string) => request<MessageItem[]>(`/sessions/${sid}/messages`),
-  sseUrl: (sid: string) => apiUrl(`/sessions/${sid}/events`),
+  sseUrl: (sid: string) =>
+    apiUrl(`/sessions/${sid}/events?token=${encodeURIComponent(getAuthToken())}`),
 
   // Swarm API
   listSwarmPresets: () => request<SwarmPreset[]>("/swarm/presets"),
@@ -117,7 +118,8 @@ export const api = {
     }),
   listSwarmRuns: () => request<SwarmRunSummary[]>("/swarm/runs"),
   getSwarmRun: (id: string) => request<Record<string, unknown>>(`/swarm/runs/${id}`),
-  swarmSseUrl: (id: string) => apiUrl(`/swarm/runs/${id}/events`),
+  swarmSseUrl: (id: string) =>
+    apiUrl(`/swarm/runs/${id}/events?token=${encodeURIComponent(getAuthToken())}`),
   cancelSwarmRun: (id: string) =>
     request<{ status: string }>(`/swarm/runs/${id}/cancel`, { method: "POST" }),
   getCorrelation: (codes: string, days: number, method: "pearson" | "spearman") =>

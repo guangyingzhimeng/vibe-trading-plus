@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 # Dedicated thread pool limited to four concurrent agents to avoid exhausting the default executor.
 _AGENT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent")
+_USER_RUNTIME_ENV_LOCK = threading.RLock()
 
 from src.session.events import EventBus
 from src.session.models import (
@@ -39,6 +41,8 @@ class SessionService:
         store: SessionStore,
         event_bus: EventBus,
         runs_dir: Path,
+        memory_dir: Optional[Path] = None,
+        env_loader: Optional[Callable[[], Dict[str, str]]] = None,
     ) -> None:
         """Initialize the session service.
 
@@ -50,6 +54,8 @@ class SessionService:
         self.store = store
         self.event_bus = event_bus
         self.runs_dir = runs_dir
+        self.memory_dir = memory_dir
+        self.env_loader = env_loader
         self._active_loops: Dict[str, "AgentLoop"] = {}
         self._search_index = get_shared_index()
 
@@ -227,14 +233,6 @@ class SessionService:
         Returns:
             Result dictionary containing status, run_dir, run_id, metrics, and related fields.
         """
-        from src.tools import build_registry
-        from src.providers.chat import ChatLLM
-        from src.agent.loop import AgentLoop
-        from src.memory.persistent import PersistentMemory
-
-        llm = ChatLLM()
-        pm = PersistentMemory()
-
         session_id = attempt.session_id
         attempt_id = attempt.attempt_id
 
@@ -243,30 +241,43 @@ class SessionService:
             data["attempt_id"] = attempt_id
             self.event_bus.emit(session_id, event_type, data)
 
-        agent = AgentLoop(
-            registry=build_registry(persistent_memory=pm),
-            llm=llm,
-            event_callback=event_callback,
-            max_iterations=50,
-            persistent_memory=pm,
-        )
-        self._active_loops[session_id] = agent
-
         # Build the message history context.
         history = self._convert_messages_to_history(messages) if messages else None
 
-        try:
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                _AGENT_EXECUTOR,
-                lambda: agent.run(
-                    user_message=attempt.prompt,
-                    history=history,
-                    session_id=session_id,
-                ),
-            )
-        finally:
-            self._active_loops.pop(session_id, None)
+        def run_agent_with_user_env() -> Dict[str, Any]:
+            from src.tools import build_registry
+            from src.providers.chat import ChatLLM
+            from src.agent.loop import AgentLoop
+            from src.memory.persistent import PersistentMemory
+
+            with _USER_RUNTIME_ENV_LOCK:
+                if self.env_loader:
+                    self.env_loader()
+                llm = ChatLLM()
+                pm = PersistentMemory(memory_dir=self.memory_dir)
+                agent = AgentLoop(
+                    registry=build_registry(persistent_memory=pm),
+                    llm=llm,
+                    event_callback=event_callback,
+                    max_iterations=50,
+                    persistent_memory=pm,
+                    runs_dir=self.runs_dir,
+                )
+                self._active_loops[session_id] = agent
+                try:
+                    return agent.run(
+                        user_message=attempt.prompt,
+                        history=history,
+                        session_id=session_id,
+                    )
+                finally:
+                    self._active_loops.pop(session_id, None)
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            _AGENT_EXECUTOR,
+            run_agent_with_user_env,
+        )
 
         # Load metrics from the run output when available.
         if result.get("run_dir"):

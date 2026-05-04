@@ -12,6 +12,25 @@ services:
     volumes:
       - vibe-runs:/app/agent/runs
       - vibe-sessions:/app/agent/sessions
+      - vibe-user-data:/app/agent/user_data
+      - vibe-uploads:/app/agent/uploads
+      - vibe-swarm:/app/agent/.swarm
+    environment:
+      - MONGO_URI=mongodb://trading:vibe-trading@mongo:27017/vibe_trading?authSource=admin
+    depends_on:
+      mongo:
+        condition: service_started
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=trading
+      - MONGO_INITDB_ROOT_PASSWORD=vibe-trading
+    volumes:
+      - vibe-mongo:/data/db
     restart: unless-stopped
 
   frontend:
@@ -35,3 +54,7 @@ services:
 volumes:
   vibe-runs:
   vibe-sessions:
+  vibe-user-data:
+  vibe-uploads:
+  vibe-swarm:
+  vibe-mongo:
