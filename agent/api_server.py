@@ -182,7 +182,7 @@ class LLMSettingsResponse(BaseModel):
 
 
 class UpdateLLMSettingsRequest(BaseModel):
-    """Update LLM settings persisted to agent/.env."""
+    """Update LLM settings persisted to the current user's settings store."""
 
     provider: str = Field(..., min_length=1)
     model_name: str = Field(..., min_length=1)
@@ -639,7 +639,18 @@ def _coerce_int(value: str, default: int) -> int:
         return default
 
 
-def _build_llm_settings_response(values: Optional[Dict[str, str]] = None) -> LLMSettingsResponse:
+def _settings_storage_label(user: Optional[Dict[str, Any]]) -> str:
+    """Return the user-visible settings storage location."""
+    if _user_key_from_payload(user):
+        return "MongoDB: vibe_trading.user_settings/current_user"
+    return _project_relative_path(ENV_PATH)
+
+
+def _build_llm_settings_response(
+    values: Optional[Dict[str, str]] = None,
+    *,
+    storage_label: Optional[str] = None,
+) -> LLMSettingsResponse:
     """Build the public settings payload from dotenv values."""
     env_values = values if values is not None else _read_settings_env_values()
     provider_name = env_values.get("LANGCHAIN_PROVIDER", "openai").strip().lower()
@@ -668,7 +679,7 @@ def _build_llm_settings_response(values: Optional[Dict[str, str]] = None) -> LLM
         timeout_seconds=_coerce_int(env_values.get("TIMEOUT_SECONDS", "120"), 120),
         max_retries=_coerce_int(env_values.get("MAX_RETRIES", "2"), 2),
         reasoning_effort=env_values.get("LANGCHAIN_REASONING_EFFORT", "").strip().lower(),
-        env_path=_project_relative_path(ENV_PATH),
+        env_path=storage_label or _project_relative_path(ENV_PATH),
         providers=LLM_PROVIDERS,
     )
 
@@ -686,7 +697,11 @@ def _baostock_installed() -> bool:
     return importlib.util.find_spec("baostock") is not None
 
 
-def _build_data_source_settings_response(values: Optional[Dict[str, str]] = None) -> DataSourceSettingsResponse:
+def _build_data_source_settings_response(
+    values: Optional[Dict[str, str]] = None,
+    *,
+    storage_label: Optional[str] = None,
+) -> DataSourceSettingsResponse:
     """Build the public data source settings payload."""
     env_values = values if values is not None else _read_settings_env_values()
     token = env_values.get("TUSHARE_TOKEN", "")
@@ -705,7 +720,7 @@ def _build_data_source_settings_response(values: Optional[Dict[str, str]] = None
         baostock_supported=supported,
         baostock_installed=installed,
         baostock_message=baostock_message,
-        env_path=_project_relative_path(ENV_PATH),
+        env_path=storage_label or _project_relative_path(ENV_PATH),
     )
 
 
@@ -1051,7 +1066,10 @@ async def list_runs(limit: int = 20, user: Dict[str, Any] = Depends(require_auth
 )
 async def get_llm_settings(user: Optional[Dict[str, Any]] = Depends(require_local_or_auth)):
     """Return project-local LLM settings for the Web UI."""
-    return _build_llm_settings_response(_read_user_settings_values(user))
+    return _build_llm_settings_response(
+        _read_user_settings_values(user),
+        storage_label=_settings_storage_label(user),
+    )
 
 
 @app.put("/settings/llm", response_model=LLMSettingsResponse)
@@ -1112,7 +1130,10 @@ async def update_llm_settings(
 
     _write_user_settings_values(user, updates)
     _sync_runtime_env(provider, updates)
-    return _build_llm_settings_response(_read_user_settings_values(user))
+    return _build_llm_settings_response(
+        _read_user_settings_values(user),
+        storage_label=_settings_storage_label(user),
+    )
 
 
 @app.get(
@@ -1121,7 +1142,10 @@ async def update_llm_settings(
 )
 async def get_data_source_settings(user: Optional[Dict[str, Any]] = Depends(require_local_or_auth)):
     """Return project-local data source credentials for the Web UI."""
-    return _build_data_source_settings_response(_read_user_settings_values(user))
+    return _build_data_source_settings_response(
+        _read_user_settings_values(user),
+        storage_label=_settings_storage_label(user),
+    )
 
 
 @app.put(
@@ -1151,7 +1175,10 @@ async def update_data_source_settings(
         else:
             os.environ.pop("TUSHARE_TOKEN", None)
 
-    return _build_data_source_settings_response(_read_user_settings_values(user))
+    return _build_data_source_settings_response(
+        _read_user_settings_values(user),
+        storage_label=_settings_storage_label(user),
+    )
 
 
 @app.get("/health", response_model=HealthResponse)

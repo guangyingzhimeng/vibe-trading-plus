@@ -57,6 +57,7 @@ class UserSettingsService:
             {
                 "$set": {
                     **set_values,
+                    "user_key": user_key,
                     "openid": openid,
                     "updated_at": now,
                 },
