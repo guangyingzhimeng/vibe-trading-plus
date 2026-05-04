@@ -4,6 +4,10 @@
 FROM node:20-slim AS frontend-build
 
 WORKDIR /app/frontend
+ARG VITE_BROWSER_API_URL="https://guangyingzhimeng.dpdns.org"
+ARG VITE_BROWSER_API_PREFIX="/vibe-trading"
+ENV VITE_BROWSER_API_URL=$VITE_BROWSER_API_URL
+ENV VITE_BROWSER_API_PREFIX=$VITE_BROWSER_API_PREFIX
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY frontend/ ./
