@@ -271,16 +271,22 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# CORS: override with CORS_ORIGINS (comma-separated)
+# CORS: override with CORS_ORIGINS (comma-separated) and CORS_ORIGIN_REGEX.
 _CORS_ORIGINS = os.getenv(
     "CORS_ORIGINS",
     "http://localhost:3000,http://localhost:5173,http://localhost:8000,"
-    "http://127.0.0.1:3000,http://127.0.0.1:5173,http://127.0.0.1:8000",
-).split(",")
+    "http://localhost:5899,http://127.0.0.1:3000,http://127.0.0.1:5173,"
+    "http://127.0.0.1:5899,http://127.0.0.1:8000,https://vibe-trading.pages.dev",
+)
+_CORS_ORIGIN_REGEX = os.getenv(
+    "CORS_ORIGIN_REGEX",
+    r"https://[a-z0-9-]+\.vibe-trading\.pages\.dev",
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_CORS_ORIGINS,
+    allow_origins=[origin.strip() for origin in _CORS_ORIGINS.split(",") if origin.strip()],
+    allow_origin_regex=_CORS_ORIGIN_REGEX or None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
